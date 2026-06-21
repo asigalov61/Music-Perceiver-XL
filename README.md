@@ -5,5 +5,11 @@
 
 ***
 
+## Abstract
+
+> A hierarchical, memory‑augmented autoregressive architecture for symbolic‑music modeling, implemented in PyTorch / x‑transformers 2.3.1, that introduces bar‑level and global‑level Perceiver memories, dynamic bar segmentation, and fully streaming generation with KV‑cache support.
+
+***
+
 ### Project Los Angeles
 ### Tegridy Code 2026
