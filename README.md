@@ -28,5 +28,21 @@ Overall, Music Perceiver XL provides a **scalable, structure‑aware, and comput
 
 ***
 
+## Install
+
+```sh
+!git clone https://github.com/asigalov61/Music-Perceiver-XL
+
+!pip install tqdm
+!pip install einx
+!pip install einops
+!pip install torch-summary
+!pip install matplotlib
+!pip install scikit-learn
+!pip install numpy
+```
+
+***
+
 ### Project Los Angeles
 ### Tegridy Code 2026
