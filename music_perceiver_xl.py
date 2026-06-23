@@ -100,7 +100,7 @@ class PerceiverMemory(nn.Module):
         combined = self.self_attn(combined, mask=mask) + combined
         combined = self.ff(combined) + combined
         return self.norm(combined[:, :self.num_latents])
-
+        
 ###################################################################################
 
 class MusicPerceiverXL(nn.Module):
@@ -115,6 +115,8 @@ class MusicPerceiverXL(nn.Module):
         num_bar_latents=8,
         global_latent_dim=512,
         num_global_latents=16,
+        max_bars=64,
+        max_bar_len=512,
         bar_tok_ids_range=range(384, 512)
     ):
         super().__init__()
@@ -123,13 +125,15 @@ class MusicPerceiverXL(nn.Module):
         self.max_seq_len = max_seq_len
         self.num_bar_latents = num_bar_latents
         self.num_global_latents = num_global_latents
+        self.max_bars = max_bars
+        self.max_bar_len = max_bar_len
+
+        self.max_context_len = num_global_latents + max_bars * num_bar_latents
 
         self.output_is_log_prob = False
         self.add_continuous_pred_head = False
         
-        # Enable KV caching for fast generation
         self.can_cache_kv = True
-        # Allow generation BEYOND max_seq_len
         self.can_cache_kv_outside_max_seq_len = True
 
         bar_tok_mask = torch.zeros(num_tokens, dtype=torch.bool)
@@ -147,7 +151,10 @@ class MusicPerceiverXL(nn.Module):
             max_seq_len=max_seq_len,
             attn_layers=Decoder(
                 dim=dim, depth=depth, heads=heads,
-                cross_attend=True, rotary_pos_emb=True, attn_flash=True
+                cross_attend=True, 
+                rotary_pos_emb=True, 
+                attn_flash=True,
+                cross_attn_flash=False
             )
         )
 
@@ -157,26 +164,36 @@ class MusicPerceiverXL(nn.Module):
         if hasattr(self.decoder, 'attn_layers'):
             self.decoder.attn_layers.cache = None
 
+    def enable_gradient_checkpointing(self):
+        """FIX 5: Enable gradient checkpointing to reduce activation memory"""
+        for layer in self.decoder.attn_layers.layers:
+            if hasattr(layer, 'attn'):
+                layer.attn.checkpoint = True
+            if hasattr(layer, 'ff'):
+                layer.ff.checkpoint = True
+
     def build_hierarchical_memory(self, tokens):
         b, seq_len = tokens.shape
         device = tokens.device
         dim = self.dim
         num_bar_latents = self.num_bar_latents
         num_global_latents = self.num_global_latents
+        max_bars = self.max_bars
+        max_bar_len = self.max_bar_len
 
         tok_emb = self.token_emb(tokens)
 
         is_bar_tok = self.bar_tok_mask[tokens]
         is_bar_tok[:, 0] = False
         bar_idx = is_bar_tok.long().cumsum(dim=1)
+        bar_idx = bar_idx.clamp(max=max_bars - 1)
 
-        max_bars = bar_idx.max().item() + 1
         total_bars = b * max_bars
 
         batch_idx = torch.arange(b, device=device).unsqueeze(1)
         global_bar = (batch_idx * max_bars + bar_idx).reshape(-1)
 
-        sort_key = global_bar * 2048 + torch.arange(b * seq_len, device=device)
+        sort_key = global_bar * max_bar_len + torch.arange(b * seq_len, device=device) % max_bar_len
         perm = sort_key.argsort()
         
         sorted_emb = tok_emb.reshape(-1, dim)[perm]
@@ -185,13 +202,10 @@ class MusicPerceiverXL(nn.Module):
         is_new = torch.cat([torch.ones(1, dtype=torch.bool, device=device),
                            sorted_bar[1:] != sorted_bar[:-1]])
         pos_in_bar = is_new.long().cumsum(0) - 1
-
-        bar_lengths = torch.zeros(total_bars, dtype=torch.long, device=device)
-        bar_lengths.scatter_add_(0, global_bar, torch.ones_like(global_bar))
-        max_bar_len = max(bar_lengths.max().item(), 1)
+        pos_in_bar = pos_in_bar.clamp(max=max_bar_len - 1)
 
         padded = tok_emb.new_zeros(total_bars, max_bar_len, dim)
-        bar_mask = torch.zeros(total_bars, max_bar_len, dtype=torch.bool, device=device)
+        bar_mask = torch.ones(total_bars, max_bar_len, dtype=torch.bool, device=device)
         
         dest = sorted_bar * max_bar_len + pos_in_bar
         valid = pos_in_bar < max_bar_len
@@ -223,10 +237,8 @@ class MusicPerceiverXL(nn.Module):
         global_mask = torch.zeros(b, num_global_latents, dtype=torch.bool, device=device)
         context_mask = torch.cat([global_mask, bar_ctx_mask], dim=1)
 
-        # Forcibly pads context_mask to (max_seq_len - 1) which breaks flash attention 
-        # if our dynamic context length doesn't match. We manually pad it here.
         ctx_len = context.shape[1]
-        target_ctx_len = self.max_seq_len - 1
+        target_ctx_len = self.max_context_len  # e.g., 16 + 64*8 = 528
         if ctx_len < target_ctx_len:
             pad_len = target_ctx_len - ctx_len
             context = torch.cat([context, context.new_zeros(b, pad_len, context.shape[2])], dim=1)
@@ -238,7 +250,7 @@ class MusicPerceiverXL(nn.Module):
         context, context_mask = self.build_hierarchical_memory(x)
         kwargs.update(context=context, context_mask=context_mask)
         return self.decoder(x, **kwargs)
-    
+        
 ###################################################################################
 
 class TokenizedDataset(Dataset):
