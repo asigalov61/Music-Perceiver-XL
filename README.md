@@ -35,6 +35,7 @@ Overall, Music Perceiver XL provides a **scalable, structure‑aware, and comput
 
 !pip install tqdm
 !pip install einx
+!pip install torch
 !pip install einops
 !pip install torch-summary
 !pip install matplotlib
